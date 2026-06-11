@@ -1,0 +1,20 @@
+{
+"$schema": "https://playground.wordpress.net/blueprint-schema.json",
+"preferredVersions": {
+"php": "8.3",
+"wp": "latest"
+},
+"login": true,
+"landingPage": "/wp-admin/admin.php?page=scanforge-db-security",
+"steps": [
+{
+"step": "installPlugin",
+"pluginData": {
+"resource": "git:directory",
+"url": "https://github.com/adnanlimdi/ScanForge-Database-Security.git",
+"ref": "HEAD",
+"refType": "refname"
+}
+}
+]
+}
