@@ -485,7 +485,7 @@ table.sfds-table tr.sfds-row-cleaned td {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	display: block;
-	max-width: 100%;
+	max-width: 250px;
 }
 
 /* ── Row clean button ────────────────────────────────── */
