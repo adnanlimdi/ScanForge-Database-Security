@@ -1,10 +1,10 @@
 === ScanForge Database Security ===
-Contributors: adnanlimdi
-Tags: security, malware, database, scanner, cleanup ,vulnerability, hack,
+Contributors: adnan.limdi,adnanlimdi
+Tags: security, malware, database, scanner, cleanup
 Requires at least: 5.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: scanforge-db-security
@@ -93,9 +93,11 @@ Yes. The plugin uses WordPress's $wpdb object which automatically handles custom
 
 == Screenshots ==
 
-1. Main scanner interface showing scan results
-2. Threat details with clean action buttons
-3. Scan complete — database clean confirmation
+1.Main Scanner Interface Displaying Scan Results
+2.Download Database Backup with Scan Report
+3.No Threats Found — Database is Clean
+4.Scan Complete — Database Successfully Cleaned
+5.Items Requiring Manual Removal After Scan
 
 == Changelog ==
 

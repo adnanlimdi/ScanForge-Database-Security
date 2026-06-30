@@ -371,6 +371,11 @@
 }
 
 /* ── Results panel ───────────────────────────────────── */
+#sfds-results-wrap {
+	max-width: 100%;
+	overflow-x: auto;
+}
+
 .sfds-panel {
 	background: var(--sfds-surface);
 	border: 1px solid var(--sfds-border);
@@ -410,21 +415,22 @@
 /* ── Results table ───────────────────────────────────── */
 table.sfds-table {
 	width: 100%;
+	max-width: 100%;
 	border-collapse: collapse;
 	font-size: 13px;
 	table-layout: fixed;
 }
 
-table.sfds-table colgroup col:nth-child(1) { width: 44px; }
-table.sfds-table colgroup col:nth-child(2) { width: 165px; }
-table.sfds-table colgroup col:nth-child(3) { width: 125px; }
-table.sfds-table colgroup col:nth-child(4) { width: 75px; }
-table.sfds-table colgroup col:nth-child(5) { width: 200px; }
+table.sfds-table colgroup col:nth-child(1) { width: 36px; }
+table.sfds-table colgroup col:nth-child(2) { width: 110px; }
+table.sfds-table colgroup col:nth-child(3) { width: 100px; }
+table.sfds-table colgroup col:nth-child(4) { width: 70px; }
+table.sfds-table colgroup col:nth-child(5) { width: 170px; }
 table.sfds-table colgroup col:nth-child(6) { width: auto; }
-table.sfds-table colgroup col:nth-child(7) { width: 84px; }
+table.sfds-table colgroup col:nth-child(7) { width: 80px; }
 
 table.sfds-table th {
-	padding: 9px 14px;
+	padding: 9px 12px;
 	text-align: left;
 	font-size: 10px;
 	font-weight: 700;
@@ -434,13 +440,28 @@ table.sfds-table th {
 	background: #f8fafc;
 	border-bottom: 1px solid var(--sfds-border);
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 table.sfds-table td {
-	padding: 10px 14px;
+	padding: 10px 12px;
 	border-bottom: 1px solid #f1f5f9;
 	vertical-align: middle;
 	color: var(--sfds-text);
+	/* Force every cell to respect its column width — without this, a long
+	   unbroken string (base64 / serialized data) pushes the whole table
+	   and the page wider than the container, even with table-layout:fixed. */
+	overflow: hidden;
+	max-width: 0; /* works together with table-layout:fixed colgroup widths */
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/* Cells that legitimately wrap or hold inline elements override the clip. */
+table.sfds-table td:first-child {
+	max-width: none;
+	white-space: normal;
 }
 
 table.sfds-table tbody tr:last-child td { border-bottom: none; }
@@ -450,6 +471,15 @@ table.sfds-table tbody tr:hover td { background: #f8fafc; }
 table.sfds-table tr.sfds-row-cleaned td {
 	opacity: 0.35;
 	text-decoration: line-through;
+}
+
+/* Row that failed auto-clean — needs manual attention in phpMyAdmin. */
+table.sfds-table tr.sfds-row-manual td {
+	background: var(--sfds-amber-bg);
+}
+
+table.sfds-table tr.sfds-row-manual td:first-child {
+	border-left: 3px solid var(--sfds-amber);
 }
 
 /* ── Badges ──────────────────────────────────────────── */
@@ -485,7 +515,7 @@ table.sfds-table tr.sfds-row-cleaned td {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	display: block;
-	max-width: 250px;
+	max-width: 100%;
 }
 
 /* ── Row clean button ────────────────────────────────── */
@@ -519,6 +549,19 @@ table.sfds-table tr.sfds-row-cleaned td {
 	color: var(--sfds-green) !important;
 	cursor: default !important;
 	pointer-events: none;
+}
+
+/* Failed auto-clean — clickable again, styled amber to flag manual review. */
+.sfds-row-btn.is-manual {
+	background: var(--sfds-amber-bg) !important;
+	border-color: var(--sfds-amber-border) !important;
+	color: var(--sfds-amber) !important;
+}
+
+.sfds-row-btn.is-manual:hover {
+	background: var(--sfds-amber) !important;
+	color: #fff !important;
+	border-color: var(--sfds-amber) !important;
 }
 
 /* ── Empty state ─────────────────────────────────────── */

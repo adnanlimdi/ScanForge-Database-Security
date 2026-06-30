@@ -64,28 +64,45 @@
 	/**
 	 * Send an AJAX POST and call cb( response.data ) on success.
 	 *
+	 * Each call now has its own short timeout. Combined with the unit-by-unit
+	 * scan/clean loops, a single slow request fails fast with a clear message
+	 * instead of the browser hanging until a generic, unhelpful network error.
+	 *
 	 * @param {string}   action WordPress AJAX action slug.
 	 * @param {Object}   data   Extra POST fields.
 	 * @param {Function} cb     Success callback receives response.data.
 	 */
 	function doAjax( action, data, cb ) {
-		$.post(
-			sfdsData.ajaxUrl,
-			$.extend( { action: action, nonce: sfdsData.nonce }, data ),
-			function ( response ) {
-				if ( response.success ) {
+		$.ajax( {
+			url:      sfdsData.ajaxUrl,
+			method:   'POST',
+			data:     $.extend( { action: action, nonce: sfdsData.nonce }, data ),
+			dataType: 'json',
+			timeout:  30000 // 30s per request — each unit/row is small, so this is generous.
+		} )
+			.done( function ( response ) {
+				if ( response && response.success ) {
 					cb( response.data );
 				} else {
-					var msg = ( response.data && response.data.message )
+					var msg = ( response && response.data && response.data.message )
 						? response.data.message
-						: 'Request failed.';
+						: sfdsData.i18n.dbError;
 					setStatus( msg, '' );
 				}
-			},
-			'json'
-		).fail( function ( xhr ) {
-			setStatus( 'Request error: ' + xhr.statusText, '' );
-		} );
+			} )
+			.fail( function ( xhr, textStatus ) {
+				var msg;
+				if ( 'timeout' === textStatus ) {
+					msg = sfdsData.i18n.requestTimeout;
+				} else if ( xhr.status >= 500 ) {
+					msg = sfdsData.i18n.serverError + ' (HTTP ' + xhr.status + ')';
+				} else if ( 0 === xhr.status ) {
+					msg = sfdsData.i18n.connectionLost;
+				} else {
+					msg = sfdsData.i18n.dbError + ' (' + textStatus + ')';
+				}
+				setStatus( msg, '' );
+			} );
 	}
 
 	/**
@@ -152,7 +169,7 @@
 			html += '<td><strong>' + escHtml( String( r.row_id ) ) + '</strong></td>';
 			html += '<td><span class="sfds-badge sfds-badge-threat">' + escHtml( r.label ) + '</span></td>';
 			html += '<td><span class="sfds-snippet" title="' + escHtml( r.snippet ) + '">' + escHtml( r.snippet ) + '</span></td>';
-			html += '<td><button class="button button-small sfds-clean-row-btn" data-index="' + parseInt( i, 10 ) + '">';
+			html += '<td><button class="button button-small sfds-row-btn" data-index="' + parseInt( i, 10 ) + '">';
 			html += escHtml( sfdsData.i18n.clean ) + '</button></td>';
 			html += '</tr>';
 		} );
@@ -161,28 +178,30 @@
 		$wrap.html( html );
 	}
 
-	// ── Scan ─────────────────────────────────────────────────
+	// ── Scan (batched, one table+column unit per request) ────
 
-	$btnScan.on( 'click', function () {
-		$btnScan.prop( 'disabled', true )
-			.find( '.dashicons' )
-			.removeClass( 'dashicons-search' )
-			.addClass( 'sfds-spinner dashicons-update' );
-
-		setStatus( sfdsData.i18n.scanning, 'is-scanning' );
-		setStat( 'sfds-stat-scanned', '5' );
-		setStat( 'sfds-stat-threats', '…' );
-		setStat( 'sfds-stat-cleaned', cleanedCount || '0' );
-		$wrap.html( '' );
-
-		doAjax( 'sfds_scan', {}, function ( data ) {
+	/**
+	 * Scan every unit (table+column pair) one at a time.
+	 *
+	 * Looping in JS instead of scanning everything in a single PHP request
+	 * avoids 504 Gateway Timeout / generic "Request error" failures on hosts
+	 * with short proxy timeouts — each request only checks 15 patterns
+	 * against one column, however many units exist (currently 9).
+	 *
+	 * @param {Array}  units     Array of { table, column, pk } unit objects.
+	 * @param {number} idx       Current index in the loop.
+	 * @param {Array}  collected Threats collected so far across all units.
+	 */
+	function scanUnitsSequentially( units, idx, collected ) {
+		if ( idx >= units.length ) {
+			// Done — finalise and render.
 			$btnScan.prop( 'disabled', false )
 				.find( '.dashicons' )
 				.removeClass( 'sfds-spinner dashicons-update' )
 				.addClass( 'dashicons-search' );
 
-			scanResults = data.results;
-			var count   = data.count;
+			scanResults = collected;
+			var count   = collected.length;
 
 			setStat( 'sfds-stat-threats', count );
 
@@ -197,12 +216,58 @@
 			}
 
 			renderResults( scanResults );
+			return;
+		}
+
+		var unit = units[ idx ];
+
+		setStatus(
+			sfdsData.i18n.scanningUnit + ' ' + escHtml( unit.table ) + '.' + escHtml( unit.column ) +
+			' (' + ( idx + 1 ) + ' / ' + units.length + ')',
+			'is-scanning'
+		);
+
+		doAjax(
+			'sfds_scan_unit',
+			{ table: unit.table, column: unit.column },
+			function ( data ) {
+				var merged = collected.concat( data.results );
+				// Keep the live count updating as we go, not just at the end.
+				setStat( 'sfds-stat-threats', merged.length );
+				scanUnitsSequentially( units, idx + 1, merged );
+			}
+		);
+	}
+
+	$btnScan.on( 'click', function () {
+		$btnScan.prop( 'disabled', true )
+			.find( '.dashicons' )
+			.removeClass( 'dashicons-search' )
+			.addClass( 'sfds-spinner dashicons-update' );
+
+		setStatus( sfdsData.i18n.scanning, 'is-scanning' );
+		setStat( 'sfds-stat-scanned', '5' );
+		setStat( 'sfds-stat-threats', '…' );
+		setStat( 'sfds-stat-cleaned', cleanedCount || '0' );
+		$wrap.html( '' );
+
+		// First fetch the list of units, then scan them one at a time.
+		doAjax( 'sfds_get_scan_units', {}, function ( data ) {
+			if ( ! data.units || ! data.units.length ) {
+				$btnScan.prop( 'disabled', false )
+					.find( '.dashicons' )
+					.removeClass( 'sfds-spinner dashicons-update' )
+					.addClass( 'dashicons-search' );
+				setStatus( sfdsData.i18n.dbError, '' );
+				return;
+			}
+			scanUnitsSequentially( data.units, 0, [] );
 		} );
 	} );
 
 	// ── Clean single row (delegated) ─────────────────────────
 
-	$wrap.on( 'click', '.sfds-clean-row-btn', function () {
+	$wrap.on( 'click', '.sfds-row-btn', function () {
 		var $btn  = $( this );
 		var index = parseInt( $btn.data( 'index' ), 10 );
 		var r     = scanResults[ index ];
@@ -224,16 +289,100 @@
 					setStat( 'sfds-stat-cleaned', cleanedCount );
 					setStatus( sfdsData.i18n.rowCleaned + ' #' + escHtml( String( r.row_id ) ) + ' in ' + escHtml( r.table ), 'is-clean' );
 				} else {
-					$btn.prop( 'disabled', false ).text( sfdsData.i18n.clean );
-					setStatus( sfdsData.i18n.rowFailed + ' #' + escHtml( String( r.row_id ) ) + ' — ' + sfdsData.i18n.noChange, 'is-found' );
+					// Auto-clean failed — flag the row and point to manual cleaning.
+					$( '#sfds-row-' + index ).addClass( 'sfds-row-manual' );
+					$btn.prop( 'disabled', false )
+						.text( sfdsData.i18n.manualClean )
+						.addClass( 'is-manual' )
+						.attr( 'title', sfdsData.i18n.manualClean );
+					setStatus( sfdsData.i18n.rowFailed + ' #' + escHtml( String( r.row_id ) ) + ' — ' + sfdsData.i18n.manualClean, 'is-found' );
 				}
 			}
 		);
 	} );
 
-	// ── Clean all ────────────────────────────────────────────
+	// ── Clean all (sequential, one row per request) ──────────
+
+	/**
+	 * Clean every threat in scanResults one at a time.
+	 *
+	 * Looping in JS instead of cleaning everything in a single PHP request
+	 * avoids 504 Gateway Timeout errors on hosts with short proxy timeouts
+	 * (nginx commonly defaults to 60s) — each request only cleans one row,
+	 * however many threats exist.
+	 *
+	 * @param {Array}    items    Array of threat objects to clean.
+	 * @param {number}   idx      Current index in the loop.
+	 * @param {number}   cleaned  Running count of successful cleans.
+	 * @param {number}   failed   Running count of failed cleans.
+	 */
+	function cleanAllSequentially( items, idx, cleaned, failed ) {
+		if ( idx >= items.length ) {
+			// Done — show final tally. Scanning is no longer auto-triggered here:
+			// since Scan itself now loops over 9 units sequentially, silently
+			// re-running it straight after Clean All looked like an unexplained
+			// second operation. The admin can click Scan again if they want to
+			// confirm the database is clean.
+			$btnClean.prop( 'disabled', false ).find( '.dashicons' ).removeClass( 'sfds-spinner' );
+			cleanedCount = cleaned;
+			setStat( 'sfds-stat-cleaned', cleanedCount );
+
+			var summary = sfdsData.i18n.cleanDone + ': ' + cleaned + '  ' +
+				sfdsData.i18n.cleanFailed + ': ' + failed;
+
+			if ( failed > 0 ) {
+				// Some rows couldn't be auto-cleaned — point the admin to phpMyAdmin.
+				summary += ' — ' + failed + ' ' + sfdsData.i18n.someFailedManual;
+				setStatus( summary, 'is-found' );
+			} else {
+				summary += ' — ' + sfdsData.i18n.rescanPrompt;
+				setStatus( summary, 'is-clean' );
+			}
+
+			return;
+		}
+
+		var r = items[ idx ];
+
+		setStatus(
+			sfdsData.i18n.cleaning + ' (' + ( idx + 1 ) + ' / ' + items.length + ')',
+			'is-cleaning'
+		);
+
+		doAjax(
+			'sfds_clean_row',
+			{ table: r.table, column: r.column, pk: r.pk, row_id: r.row_id },
+			function ( data ) {
+				var $row = $( '#sfds-row-' + idx );
+
+				if ( data.cleaned ) {
+					$row.addClass( 'sfds-row-cleaned' );
+					$row.find( '.sfds-row-btn' ).text( sfdsData.i18n.done ).addClass( 'is-done' ).prop( 'disabled', true );
+					cleaned++;
+				} else {
+					// Mark the row so the admin can spot it and clean manually.
+					$row.addClass( 'sfds-row-manual' );
+					$row.find( '.sfds-row-btn' )
+						.text( sfdsData.i18n.manualClean )
+						.addClass( 'is-manual' )
+						.attr( 'title', sfdsData.i18n.manualClean )
+						.prop( 'disabled', false );
+					failed++;
+				}
+
+				setStat( 'sfds-stat-cleaned', cleaned );
+
+				// Continue to the next item regardless of success/failure.
+				cleanAllSequentially( items, idx + 1, cleaned, failed );
+			}
+		);
+	}
 
 	$btnClean.on( 'click', function () {
+		if ( ! scanResults.length ) {
+			return;
+		}
+
 		if ( ! window.confirm( sfdsData.i18n.confirmClean ) ) {
 			return;
 		}
@@ -242,20 +391,8 @@
 			.find( '.dashicons' )
 			.addClass( 'sfds-spinner' );
 
-		setStatus( sfdsData.i18n.cleaning, 'is-cleaning' );
-
-		doAjax( 'sfds_clean_all', {}, function ( data ) {
-			$btnClean.find( '.dashicons' ).removeClass( 'sfds-spinner' );
-			cleanedCount = data.cleaned;
-			setStat( 'sfds-stat-cleaned', cleanedCount );
-			setStatus(
-				sfdsData.i18n.cleanDone + ': ' + data.cleaned + '  ' +
-				sfdsData.i18n.cleanFailed + ': ' + data.failed + ' — Re-scanning…',
-				'is-clean'
-			);
-			// Re-scan automatically to confirm all threats gone.
-			setTimeout( function () { $btnScan.trigger( 'click' ); }, 1500 );
-		} );
+		// Loop sequentially over every threat from the row index 0.
+		cleanAllSequentially( scanResults, 0, 0, 0 );
 	} );
 
 	// ── Export CSV ───────────────────────────────────────────

@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name:       ScanForge Database Security
- * Plugin URI:        https://adnanlimdiwala.wordpress.com/
+ * Plugin URI:        https://wordpress.org/plugins/search/scanforge-db-security/
  * Description:       Scans and removes malicious scripts and malware injections from your WordPress database tables.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 5.0
  * Requires PHP:      7.4
  * Author:            adnanlimdi
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Define plugin constants.
-define( 'SFDS_VERSION',     '1.0.0' );
+define( 'SFDS_VERSION',     '1.0.1' );
 define( 'SFDS_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'SFDS_PLUGIN_URL',  plugins_url( '/', __FILE__ ) );
 define( 'SFDS_PLUGIN_FILE', __FILE__ );

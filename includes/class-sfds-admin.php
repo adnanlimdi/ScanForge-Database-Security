@@ -26,13 +26,15 @@ class SFDS_Admin {
 	 * @since 1.0.0
 	 */
 	public function init() {
-		add_action( 'admin_menu',               array( $this, 'register_menu' ) );
-		add_action( 'admin_enqueue_scripts',    array( $this, 'enqueue_assets' ) );
-		add_action( 'wp_ajax_sfds_scan',        array( $this, 'ajax_scan' ) );
-		add_action( 'wp_ajax_sfds_clean_row',   array( $this, 'ajax_clean_row' ) );
-		add_action( 'wp_ajax_sfds_clean_all',   array( $this, 'ajax_clean_all' ) );
-		add_action( 'wp_ajax_sfds_get_raw',     array( $this, 'ajax_get_raw' ) );
-		add_action( 'wp_ajax_sfds_db_download', array( $this, 'ajax_db_download' ) );
+		add_action( 'admin_menu',                  array( $this, 'register_menu' ) );
+		add_action( 'admin_enqueue_scripts',       array( $this, 'enqueue_assets' ) );
+		add_action( 'wp_ajax_sfds_scan',           array( $this, 'ajax_scan' ) );
+		add_action( 'wp_ajax_sfds_get_scan_units', array( $this, 'ajax_get_scan_units' ) );
+		add_action( 'wp_ajax_sfds_scan_unit',      array( $this, 'ajax_scan_unit' ) );
+		add_action( 'wp_ajax_sfds_clean_row',      array( $this, 'ajax_clean_row' ) );
+		add_action( 'wp_ajax_sfds_clean_all',      array( $this, 'ajax_clean_all' ) );
+		add_action( 'wp_ajax_sfds_get_raw',        array( $this, 'ajax_get_raw' ) );
+		add_action( 'wp_ajax_sfds_db_download',    array( $this, 'ajax_db_download' ) );
 	}
 
 	/**
@@ -86,6 +88,7 @@ class SFDS_Admin {
 				'nonce'   => wp_create_nonce( 'sfds_nonce' ),
 				'i18n'    => array(
 					'scanning'        => __( 'Scanning database tables for malicious patterns…', 'scanforge-db-security' ),
+					'scanningUnit'    => __( 'Scanning', 'scanforge-db-security' ),
 					'noThreats'       => __( 'No threats found. Your database looks clean!', 'scanforge-db-security' ),
 					'threatsFound'    => __( 'threat(s) found. Review below and clean.', 'scanforge-db-security' ),
 					'cleaning'        => __( 'Cleaning all threats…', 'scanforge-db-security' ),
@@ -97,9 +100,15 @@ class SFDS_Admin {
 					'done'            => __( '✓ Done', 'scanforge-db-security' ),
 					'clean'           => __( 'Clean', 'scanforge-db-security' ),
 					'noChange'        => __( 'Content unchanged — may be double-serialized. Edit manually in phpMyAdmin.', 'scanforge-db-security' ),
+					'manualClean'     => __( 'Could not clean automatically. Please clean this row manually in phpMyAdmin.', 'scanforge-db-security' ),
+					'someFailedManual'=> __( 'could not be auto-cleaned — please clean those manually in phpMyAdmin.', 'scanforge-db-security' ),
+					'rescanPrompt'    => __( 'Click Scan Database again to confirm everything is clean.', 'scanforge-db-security' ),
 					'dbGenerating'    => __( 'Generating backup… this may take a moment.', 'scanforge-db-security' ),
 					'dbDone'          => __( 'Backup ready — download started.', 'scanforge-db-security' ),
 					'dbError'         => __( 'Backup failed. Please try again.', 'scanforge-db-security' ),
+					'requestTimeout'  => __( 'Request timed out. Your server may be slow — try again, it will resume where it left off.', 'scanforge-db-security' ),
+					'serverError'     => __( 'Server error occurred. Check your error log or try again.', 'scanforge-db-security' ),
+					'connectionLost'  => __( 'Connection lost. Check your internet connection and try again.', 'scanforge-db-security' ),
 					'confirmDownload' => __( 'Generate a full SQL backup of your database. Continue?', 'scanforge-db-security' ),
 					'ready'           => __( 'Ready to scan. Click "Scan Database" to begin.', 'scanforge-db-security' ),
 				),
@@ -110,7 +119,75 @@ class SFDS_Admin {
 	// ── AJAX: Scan ───────────────────────────────────────────
 
 	/**
-	 * AJAX handler — scan the database for malware patterns.
+	 * AJAX handler — return the list of scannable units.
+	 *
+	 * The UI calls this first, then loops ajax_scan_unit() once per unit.
+	 * Each unit is one table+column pair, so no single request runs more
+	 * than 15 pattern checks — this is what prevents 504 Gateway Timeout
+	 * errors on large databases.
+	 *
+	 * @since 1.0.0
+	 */
+	public function ajax_get_scan_units() {
+		check_ajax_referer( 'sfds_nonce', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'scanforge-db-security' ) ), 403 );
+		}
+
+		$scanner = new SFDS_Scanner();
+		$units   = $scanner->get_scan_units();
+
+		wp_send_json_success(
+			array(
+				'units' => $units,
+				'count' => count( $units ),
+			)
+		);
+	}
+
+	/**
+	 * AJAX handler — scan a single table+column unit.
+	 *
+	 * @since 1.0.0
+	 */
+	public function ajax_scan_unit() {
+		check_ajax_referer( 'sfds_nonce', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'scanforge-db-security' ) ), 403 );
+		}
+
+		$raw_table  = isset( $_POST['table'] )  ? sanitize_text_field( wp_unslash( $_POST['table'] ) )  : '';
+		$raw_column = isset( $_POST['column'] ) ? sanitize_text_field( wp_unslash( $_POST['column'] ) ) : '';
+
+		// Validate against the hard-coded allowlist before running any query.
+		$table  = SFDS_Patterns::validate_table( $raw_table );
+		$column = SFDS_Patterns::validate_column( $raw_table, $raw_column );
+		$pk     = SFDS_Patterns::get_primary_key( $raw_table );
+
+		if ( ! $table || ! $column || ! $pk ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid or disallowed parameters.', 'scanforge-db-security' ) ) );
+		}
+
+		$scanner = new SFDS_Scanner();
+		$results = $scanner->scan_unit( $table, $column, $pk );
+
+		wp_send_json_success(
+			array(
+				'results' => $results,
+				'count'   => count( $results ),
+			)
+		);
+	}
+
+	/**
+	 * AJAX handler — scan the entire database in one request.
+	 *
+	 * Kept for backward compatibility. The UI no longer calls this directly
+	 * for the main Scan Database button — it loops ajax_scan_unit() instead
+	 * to avoid 504 Gateway Timeout errors on larger databases. See the
+	 * SFDS_Scanner class docblock for details.
 	 *
 	 * @since 1.0.0
 	 */
@@ -119,6 +196,11 @@ class SFDS_Admin {
 
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'scanforge-db-security' ) ), 403 );
+		}
+
+		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_set_time_limit
+			@set_time_limit( 0 );
 		}
 
 		$scanner = new SFDS_Scanner();
@@ -178,6 +260,11 @@ class SFDS_Admin {
 	/**
 	 * AJAX handler — clean all threats found by a fresh scan.
 	 *
+	 * Kept for backward compatibility but no longer used by the UI for large
+	 * sites — JS now loops over individual sfds_clean_row calls instead to
+	 * avoid gateway timeouts on databases with many threats. This endpoint
+	 * still works for small scans triggered programmatically.
+	 *
 	 * @since 1.0.0
 	 */
 	public function ajax_clean_all() {
@@ -185,6 +272,14 @@ class SFDS_Admin {
 
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'scanforge-db-security' ) ), 403 );
+		}
+
+		// Raise time limit defensively; many hosts still cap this via nginx
+		// regardless, which is why the UI no longer relies on this endpoint
+		// for bulk cleaning — see sfds_clean_row for the batched approach.
+		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_set_time_limit
+			@set_time_limit( 0 );
 		}
 
 		$scanner = new SFDS_Scanner();
