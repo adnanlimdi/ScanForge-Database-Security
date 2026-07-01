@@ -337,16 +337,19 @@
 			return;
 		}
 
+		// Read the table selector — default 'all' if not found.
+		var filterTable = $( '#sfds-scan-table' ).val() || 'all';
+
 		setStatus( sfdsData.i18n.scanning, 'is-scanning' );
-		setStat( 'sfds-stat-scanned', '5' );
+		setStat( 'sfds-stat-scanned', '…' );
 		setStat( 'sfds-stat-threats', '…' );
 		setStat( 'sfds-stat-cleaned', cleanedCount || '0' );
 		$wrap.html( '' );
 
-		// First fetch the list of units, then scan them one at a time.
+		// Fetch only the units for the selected table (or all if 'all').
 		doAjax(
 			'sfds_get_scan_units',
-			{},
+			{ filter_table: filterTable },
 			function ( data ) {
 				if ( ! data.units || ! data.units.length ) {
 					$btnScan.prop( 'disabled', false )
@@ -356,6 +359,14 @@
 					setStatus( sfdsData.i18n.dbError, '' );
 					return;
 				}
+				// Show real table count from units returned.
+				var tableNames = [];
+				$.each( data.units, function ( i, u ) {
+					if ( tableNames.indexOf( u.table ) === -1 ) {
+						tableNames.push( u.table );
+					}
+				} );
+				setStat( 'sfds-stat-scanned', tableNames.length );
 				scanUnitsSequentially( data.units, 0, [] );
 			},
 			function ( errorMsg ) {

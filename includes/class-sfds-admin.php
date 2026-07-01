@@ -91,6 +91,7 @@ class SFDS_Admin {
 					'scanningUnit'    => __( 'Scanning', 'scanforge-db-security' ),
 					'scanLabel'       => __( 'Scan Database', 'scanforge-db-security' ),
 					'resumeScan'      => __( 'Resume Scan', 'scanforge-db-security' ),
+					'scanningTable'   => __( 'Scanning table', 'scanforge-db-security' ),
 					'scanStopped'     => __( 'Scan stopped at unit', 'scanforge-db-security' ),
 					'resumeHint'      => __( 'Click "Resume Scan" to continue from where it stopped.', 'scanforge-db-security' ),
 					'retrying'        => __( 'Retrying', 'scanforge-db-security' ),
@@ -140,8 +141,22 @@ class SFDS_Admin {
 			wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'scanforge-db-security' ) ), 403 );
 		}
 
+		// Optional table filter — if provided and valid, only return units for that table.
+		$raw_filter    = isset( $_POST['filter_table'] ) ? sanitize_text_field( wp_unslash( $_POST['filter_table'] ) ) : 'all';
+		$filter_table  = ( 'all' !== $raw_filter ) ? SFDS_Patterns::validate_table( $raw_filter ) : 'all';
+
 		$scanner = new SFDS_Scanner();
-		$units   = $scanner->get_scan_units();
+		$all     = $scanner->get_scan_units();
+
+		if ( 'all' !== $filter_table && $filter_table ) {
+			$units = array_values(
+				array_filter( $all, function ( $u ) use ( $filter_table ) {
+					return $u['table'] === $filter_table;
+				} )
+			);
+		} else {
+			$units = $all;
+		}
 
 		wp_send_json_success(
 			array(
@@ -478,6 +493,7 @@ class SFDS_Admin {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
+		global $wpdb;
 		?>
 		<div class="wrap sfds-wrap">
 
@@ -502,6 +518,18 @@ class SFDS_Admin {
 
 			<!-- Toolbar -->
 			<div class="sfds-toolbar">
+				<label for="sfds-scan-table" class="screen-reader-text">
+					<?php esc_html_e( 'Table to scan', 'scanforge-db-security' ); ?>
+				</label>
+				<select id="sfds-scan-table" class="sfds-select">
+					<option value="all"><?php esc_html_e( 'All Tables (5)', 'scanforge-db-security' ); ?></option>
+					<option value="<?php echo esc_attr( $wpdb->posts ); ?>"><?php echo esc_html( $wpdb->posts ); ?></option>
+					<option value="<?php echo esc_attr( $wpdb->options ); ?>"><?php echo esc_html( $wpdb->options ); ?></option>
+					<option value="<?php echo esc_attr( $wpdb->postmeta ); ?>"><?php echo esc_html( $wpdb->postmeta ); ?></option>
+					<option value="<?php echo esc_attr( $wpdb->usermeta ); ?>"><?php echo esc_html( $wpdb->usermeta ); ?></option>
+					<option value="<?php echo esc_attr( $wpdb->comments ); ?>"><?php echo esc_html( $wpdb->comments ); ?></option>
+				</select>
+
 				<button id="sfds-btn-scan" class="sfds-btn sfds-btn-primary">
 					<span class="dashicons dashicons-search"></span>
 					<span id="sfds-btn-scan-label"><?php esc_html_e( 'Scan Database', 'scanforge-db-security' ); ?></span>

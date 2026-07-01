@@ -119,6 +119,26 @@
 	flex-shrink: 0;
 }
 
+/* ── Table selector in toolbar ───────────────────────── */
+.sfds-select {
+	height: 36px !important;
+	font-size: 13px !important;
+	font-family: inherit !important;
+	border: 1px solid var(--sfds-border-mid) !important;
+	border-radius: var(--sfds-radius-sm) !important;
+	padding: 0 10px !important;
+	background: #fff !important;
+	color: var(--sfds-text) !important;
+	min-width: 180px;
+	outline: none;
+	cursor: pointer;
+}
+
+.sfds-select:focus {
+	border-color: var(--sfds-blue) !important;
+	box-shadow: 0 0 0 2px var(--sfds-blue-glow) !important;
+}
+
 /* ── Toolbar ─────────────────────────────────────────── */
 .sfds-toolbar {
 	display: flex;
