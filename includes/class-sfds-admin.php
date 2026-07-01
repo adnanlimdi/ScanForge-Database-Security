@@ -89,6 +89,11 @@ class SFDS_Admin {
 				'i18n'    => array(
 					'scanning'        => __( 'Scanning database tables for malicious patterns…', 'scanforge-db-security' ),
 					'scanningUnit'    => __( 'Scanning', 'scanforge-db-security' ),
+					'scanLabel'       => __( 'Scan Database', 'scanforge-db-security' ),
+					'resumeScan'      => __( 'Resume Scan', 'scanforge-db-security' ),
+					'scanStopped'     => __( 'Scan stopped at unit', 'scanforge-db-security' ),
+					'resumeHint'      => __( 'Click "Resume Scan" to continue from where it stopped.', 'scanforge-db-security' ),
+					'retrying'        => __( 'Retrying', 'scanforge-db-security' ),
 					'noThreats'       => __( 'No threats found. Your database looks clean!', 'scanforge-db-security' ),
 					'threatsFound'    => __( 'threat(s) found. Review below and clean.', 'scanforge-db-security' ),
 					'cleaning'        => __( 'Cleaning all threats…', 'scanforge-db-security' ),
@@ -499,7 +504,7 @@ class SFDS_Admin {
 			<div class="sfds-toolbar">
 				<button id="sfds-btn-scan" class="sfds-btn sfds-btn-primary">
 					<span class="dashicons dashicons-search"></span>
-					<?php esc_html_e( 'Scan Database', 'scanforge-db-security' ); ?>
+					<span id="sfds-btn-scan-label"><?php esc_html_e( 'Scan Database', 'scanforge-db-security' ); ?></span>
 				</button>
 				<button id="sfds-btn-clean-all" class="sfds-btn sfds-btn-danger" disabled>
 					<span class="dashicons dashicons-trash"></span>

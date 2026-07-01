@@ -9,17 +9,19 @@
 ( function ( $ ) {
 	'use strict';
 
-	var scanResults  = [];
-	var cleanedCount = 0;
+	var scanResults      = [];
+	var cleanedCount     = 0;
+	var pendingScanUnits = null; // Set when a scan stops early on failure, so it can be resumed.
 
-	var $status     = $( '#sfds-status' );
-	var $btnScan    = $( '#sfds-btn-scan' );
-	var $btnClean   = $( '#sfds-btn-clean-all' );
-	var $btnExport  = $( '#sfds-btn-export' );
-	var $btnDbDl    = $( '#sfds-btn-db-download' );
-	var $dbProgress = $( '#sfds-db-progress' );
-	var $dbProgText = $( '#sfds-db-progress-text' );
-	var $wrap       = $( '#sfds-results-wrap' );
+	var $status        = $( '#sfds-status' );
+	var $btnScan       = $( '#sfds-btn-scan' );
+	var $btnScanLabel  = $( '#sfds-btn-scan-label' );
+	var $btnClean      = $( '#sfds-btn-clean-all' );
+	var $btnExport     = $( '#sfds-btn-export' );
+	var $btnDbDl       = $( '#sfds-btn-db-download' );
+	var $dbProgress    = $( '#sfds-db-progress' );
+	var $dbProgText    = $( '#sfds-db-progress-text' );
+	var $wrap          = $( '#sfds-results-wrap' );
 
 	// ── Helpers ──────────────────────────────────────────────
 
@@ -72,7 +74,26 @@
 	 * @param {Object}   data   Extra POST fields.
 	 * @param {Function} cb     Success callback receives response.data.
 	 */
-	function doAjax( action, data, cb ) {
+	/**
+	 * Send an AJAX POST and call cb( response.data ) on success.
+	 *
+	 * Each call has its own timeout and will automatically retry on timeout
+	 * or transient server errors (up to MAX_RETRIES) before giving up. This
+	 * is what actually makes "resume where it left off" true for the
+	 * scan/clean loops — a single slow request no longer kills the whole
+	 * operation, it just retries that one unit/row a couple of times first.
+	 *
+	 * @param {string}   action  WordPress AJAX action slug.
+	 * @param {Object}   data    Extra POST fields.
+	 * @param {Function} cb      Success callback receives response.data.
+	 * @param {Function} [onFail] Optional failure callback receives the error message.
+	 *                            If omitted, the error is just shown in the status bar.
+	 * @param {number}   [attempt] Internal — current retry attempt (do not pass).
+	 */
+	function doAjax( action, data, cb, onFail, attempt ) {
+		var MAX_RETRIES = 2;
+		attempt = attempt || 0;
+
 		$.ajax( {
 			url:      sfdsData.ajaxUrl,
 			method:   'POST',
@@ -87,10 +108,29 @@
 					var msg = ( response && response.data && response.data.message )
 						? response.data.message
 						: sfdsData.i18n.dbError;
-					setStatus( msg, '' );
+					if ( onFail ) {
+						onFail( msg );
+					} else {
+						setStatus( msg, '' );
+					}
 				}
 			} )
 			.fail( function ( xhr, textStatus ) {
+				// Transient failures (timeout, 5xx, dropped connection) get retried
+				// automatically before surfacing an error to the admin.
+				var isTransient = ( 'timeout' === textStatus ) || xhr.status >= 500 || 0 === xhr.status;
+
+				if ( isTransient && attempt < MAX_RETRIES ) {
+					setStatus(
+						sfdsData.i18n.retrying + ' (' + ( attempt + 1 ) + '/' + MAX_RETRIES + ')…',
+						'is-cleaning'
+					);
+					setTimeout( function () {
+						doAjax( action, data, cb, onFail, attempt + 1 );
+					}, 1500 );
+					return;
+				}
+
 				var msg;
 				if ( 'timeout' === textStatus ) {
 					msg = sfdsData.i18n.requestTimeout;
@@ -101,7 +141,12 @@
 				} else {
 					msg = sfdsData.i18n.dbError + ' (' + textStatus + ')';
 				}
-				setStatus( msg, '' );
+
+				if ( onFail ) {
+					onFail( msg );
+				} else {
+					setStatus( msg, '' );
+				}
 			} );
 	}
 
@@ -194,11 +239,14 @@
 	 */
 	function scanUnitsSequentially( units, idx, collected ) {
 		if ( idx >= units.length ) {
-			// Done — finalise and render.
+			// Done — finalise and render. Clear resume state and restore the
+			// normal "Scan Database" label in case we were mid-resume.
+			pendingScanUnits = null;
 			$btnScan.prop( 'disabled', false )
 				.find( '.dashicons' )
-				.removeClass( 'sfds-spinner dashicons-update' )
+				.removeClass( 'sfds-spinner dashicons-update dashicons-controls-play' )
 				.addClass( 'dashicons-search' );
+			$btnScanLabel.text( sfdsData.i18n.scanLabel );
 
 			scanResults = collected;
 			var count   = collected.length;
@@ -235,6 +283,35 @@
 				// Keep the live count updating as we go, not just at the end.
 				setStat( 'sfds-stat-threats', merged.length );
 				scanUnitsSequentially( units, idx + 1, merged );
+			},
+			function ( errorMsg ) {
+				// All retries exhausted for this unit — stop the loop here but
+				// keep everything found so far, and re-enable the button so the
+				// admin can resume instead of being stuck or forced to restart.
+				$btnScan.prop( 'disabled', false )
+					.find( '.dashicons' )
+					.removeClass( 'sfds-spinner dashicons-update' )
+					.addClass( 'dashicons-search' );
+
+				scanResults = collected;
+				pendingScanUnits = units.slice( idx ); // remaining units, for Resume.
+
+				setStat( 'sfds-stat-threats', collected.length );
+				setStatus(
+					errorMsg + ' — ' + sfdsData.i18n.scanStopped +
+					' (' + idx + '/' + units.length + '). ' + sfdsData.i18n.resumeHint,
+					''
+				);
+
+				if ( collected.length ) {
+					renderResults( collected );
+					$btnClean.prop( 'disabled', false );
+					$btnExport.show();
+				}
+
+				// Flip the Scan button into "Resume Scan" mode for one click.
+				$btnScan.find( '.dashicons' ).removeClass( 'dashicons-search' ).addClass( 'dashicons-controls-play' );
+				$btnScanLabel.text( sfdsData.i18n.resumeScan );
 			}
 		);
 	}
@@ -242,8 +319,23 @@
 	$btnScan.on( 'click', function () {
 		$btnScan.prop( 'disabled', true )
 			.find( '.dashicons' )
-			.removeClass( 'dashicons-search' )
+			.removeClass( 'dashicons-search dashicons-controls-play' )
 			.addClass( 'sfds-spinner dashicons-update' );
+		$btnScanLabel.text( sfdsData.i18n.scanLabel );
+
+		// If a previous scan stopped partway, resume from there instead of
+		// re-scanning units we already finished.
+		if ( pendingScanUnits && pendingScanUnits.length ) {
+			var unitsToRun  = pendingScanUnits;
+			var alreadyHave = scanResults || [];
+			pendingScanUnits = null;
+
+			setStat( 'sfds-stat-threats', alreadyHave.length );
+			setStat( 'sfds-stat-cleaned', cleanedCount || '0' );
+
+			scanUnitsSequentially( unitsToRun, 0, alreadyHave );
+			return;
+		}
 
 		setStatus( sfdsData.i18n.scanning, 'is-scanning' );
 		setStat( 'sfds-stat-scanned', '5' );
@@ -252,17 +344,28 @@
 		$wrap.html( '' );
 
 		// First fetch the list of units, then scan them one at a time.
-		doAjax( 'sfds_get_scan_units', {}, function ( data ) {
-			if ( ! data.units || ! data.units.length ) {
+		doAjax(
+			'sfds_get_scan_units',
+			{},
+			function ( data ) {
+				if ( ! data.units || ! data.units.length ) {
+					$btnScan.prop( 'disabled', false )
+						.find( '.dashicons' )
+						.removeClass( 'sfds-spinner dashicons-update' )
+						.addClass( 'dashicons-search' );
+					setStatus( sfdsData.i18n.dbError, '' );
+					return;
+				}
+				scanUnitsSequentially( data.units, 0, [] );
+			},
+			function ( errorMsg ) {
 				$btnScan.prop( 'disabled', false )
 					.find( '.dashicons' )
 					.removeClass( 'sfds-spinner dashicons-update' )
 					.addClass( 'dashicons-search' );
-				setStatus( sfdsData.i18n.dbError, '' );
-				return;
+				setStatus( errorMsg, '' );
 			}
-			scanUnitsSequentially( data.units, 0, [] );
-		} );
+		);
 	} );
 
 	// ── Clean single row (delegated) ─────────────────────────
@@ -373,6 +476,21 @@
 				setStat( 'sfds-stat-cleaned', cleaned );
 
 				// Continue to the next item regardless of success/failure.
+				cleanAllSequentially( items, idx + 1, cleaned, failed );
+			},
+			function () {
+				// Request failed even after retries (e.g. server unreachable).
+				// Treat this row as failed-needs-manual-review but keep the
+				// batch moving — one bad row shouldn't stop the whole clean.
+				var $row = $( '#sfds-row-' + idx );
+				$row.addClass( 'sfds-row-manual' );
+				$row.find( '.sfds-row-btn' )
+					.text( sfdsData.i18n.manualClean )
+					.addClass( 'is-manual' )
+					.attr( 'title', sfdsData.i18n.manualClean )
+					.prop( 'disabled', false );
+				failed++;
+				setStat( 'sfds-stat-cleaned', cleaned );
 				cleanAllSequentially( items, idx + 1, cleaned, failed );
 			}
 		);
