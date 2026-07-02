@@ -14,26 +14,21 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Class SFDS_Scanner
  *
- * Scans WordPress database tables for malware patterns.
+ * Scans WordPress database tables for malware patterns, with false-positive
+ * filtering via SFDS_Patterns::is_false_positive().
  *
- * All table names, column names, and primary key identifiers used in SQL
- * are sourced exclusively from SFDS_Patterns::get_scan_targets() — a
- * hard-coded allowlist — and are never derived from user input. This
- * satisfies PluginCheck.Security.DirectDB without suppression comments.
- *
- * Direct queries are unavoidable here because:
- *  - We need dynamic column/table combinations not supported by WP_Query.
- *  - The LIKE pattern scan across multiple tables has no WP API equivalent.
- * All queries use $wpdb->prepare() for the LIKE value and cache is bypassed
- * intentionally (security scans must read live data).
- *
- * The full scan is broken into one table+column "unit" per call
- * (see get_scan_units() / scan_unit()) so the admin UI can run each unit
- * as its own AJAX request. This keeps every single HTTP request short —
- * checking 15 patterns against one column — instead of running all
- * 9 column × 15 pattern combinations (135 queries) inside one request,
- * which is what previously caused 504 Gateway Timeout errors on larger
- * databases or slower hosts.
+ * False positive prevention strategy
+ * ------------------------------------
+ * 1. LIKE patterns in SFDS_Patterns::get_all() are kept specific — broad
+ *    fragments like 'aHR0cHM6Ly' (base64 https://) and standalone
+ *    'fromCharCode' have been removed because they match JWT tokens, plugin
+ *    update cache, and minified JS from legitimate plugins.
+ * 2. For wp_options, each matched row's option_name is fetched and checked
+ *    against SFDS_Patterns::get_excluded_option_names() and prefix rules
+ *    (_transient_, _elementor_, icwp-, etc.) before it is flagged.
+ * 3. Context checks in SFDS_Patterns::is_false_positive() inspect the content
+ *    snippet for signs of legitimate plugin data (e.g. 'stable_version',
+ *    'auth_token') that co-occur with otherwise suspicious patterns.
  *
  * @since 1.0.0
  */
@@ -69,15 +64,16 @@ class SFDS_Scanner {
 	/**
 	 * Scan a single table+column unit for all known malware patterns.
 	 *
-	 * Runs at most 15 short LIKE queries (one per pattern) against a single
-	 * column, so it completes well within any host's proxy timeout even on
-	 * large tables.
+	 * After a LIKE match, each row is passed through
+	 * SFDS_Patterns::is_false_positive() before being added to results.
+	 * For wp_options rows, the option_name is fetched to enable name-based
+	 * exclusions (transients, Elementor cache, Shield Security data, etc.)
 	 *
 	 * @since  1.0.0
-	 * @param  string $raw_table  Table name (validated against allowlist by caller).
-	 * @param  string $raw_column Column name (validated against allowlist by caller).
+	 * @param  string $raw_table  Table name (validated against allowlist).
+	 * @param  string $raw_column Column name (validated against allowlist).
 	 * @param  string $pk         Primary key column name for this table.
-	 * @return array<int,array<string,string>> Threat records found in this unit.
+	 * @return array<int,array<string,string>> Verified threat records.
 	 */
 	public function scan_unit( $raw_table, $raw_column, $pk ) {
 		global $wpdb;
@@ -93,22 +89,24 @@ class SFDS_Scanner {
 		$safe_column = esc_sql( $raw_column );
 		$safe_pk     = esc_sql( $pk );
 
+		// Determine whether this is wp_options so we can fetch option_name
+		// for false-positive checking after a match.
+		$is_options_table = ( $raw_table === $wpdb->options );
+
 		foreach ( $patterns as $pattern => $label ) {
 
 			$like = '%' . $wpdb->esc_like( $pattern ) . '%';
 
-			/*
-			 * Direct query rationale: WP has no API for LIKE searches
-			 * across arbitrary columns. Table, column, and pk are all
-			 * sourced from the hard-coded allowlist in SFDS_Patterns —
-			 * never from user input — so interpolation is safe here.
-			 */
+			// Fetch row_id, snippet, and option_name (for wp_options only).
+			if ( $is_options_table ) {
+				$select = "SELECT `{$safe_pk}` AS row_id, `option_name`, LEFT(`{$safe_column}`, 300) AS snippet FROM `{$safe_table}` WHERE `{$safe_column}` LIKE %s LIMIT 50";
+			} else {
+				$select = "SELECT `{$safe_pk}` AS row_id, '' AS option_name, LEFT(`{$safe_column}`, 300) AS snippet FROM `{$safe_table}` WHERE `{$safe_column}` LIKE %s LIMIT 50";
+			}
+
 			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			$rows = $wpdb->get_results(
-				$wpdb->prepare(
-					"SELECT `{$safe_pk}` AS row_id, LEFT(`{$safe_column}`, 300) AS snippet FROM `{$safe_table}` WHERE `{$safe_column}` LIKE %s LIMIT 50",
-					$like
-				),
+				$wpdb->prepare( $select, $like ),
 				ARRAY_A
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
@@ -118,7 +116,21 @@ class SFDS_Scanner {
 			}
 
 			foreach ( $rows as $row ) {
-				// Deduplicate: one entry per table + row_id combination.
+
+				// ── False positive check ──────────────────────────────
+				// Pass table, option_name (empty for non-options tables),
+				// the content snippet, and the matched pattern to the
+				// false-positive filter before flagging anything.
+				$option_name = isset( $row['option_name'] ) ? $row['option_name'] : '';
+				$snippet     = isset( $row['snippet'] ) ? $row['snippet'] : '';
+
+				if ( SFDS_Patterns::is_false_positive( $raw_table, $option_name, $snippet, $pattern ) ) {
+					continue; // Skip — known safe row.
+				}
+
+				// ── Deduplicate ───────────────────────────────────────
+				// One result entry per row_id regardless of how many
+				// patterns matched.
 				$dedup_key = $raw_table . '|' . $row['row_id'];
 				if ( isset( $seen[ $dedup_key ] ) ) {
 					continue;
@@ -132,7 +144,7 @@ class SFDS_Scanner {
 					'row_id'  => $row['row_id'],
 					'pattern' => $pattern,
 					'label'   => $label,
-					'snippet' => wp_strip_all_tags( $row['snippet'] ),
+					'snippet' => wp_strip_all_tags( $snippet ),
 				);
 			}
 		}
@@ -145,11 +157,10 @@ class SFDS_Scanner {
 	 *
 	 * Kept for backward compatibility (e.g. WP-CLI or programmatic use).
 	 * The admin UI no longer calls this directly — it loops scan_unit()
-	 * over get_scan_units() instead to avoid 504 Gateway Timeout errors,
-	 * see the class docblock for details.
+	 * over get_scan_units() instead to avoid 504 Gateway Timeout errors.
 	 *
 	 * @since  1.0.0
-	 * @return array<int,array<string,string>> List of threat records found.
+	 * @return array<int,array<string,string>> List of verified threat records.
 	 */
 	public function scan() {
 		$threats = array();
